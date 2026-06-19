@@ -1,746 +1,556 @@
 // ============================================================
-// ============================================================
-//
-//          APP.JS - LOGICA PRINCIPALE
-//          Gestione Ordini Colazione Hotel
-//
-// ============================================================
+// APP.JS - Gestione Ordini Colazione Hotel
 // ============================================================
 
 // ============================================================
-// STATO APPLICAZIONE
+// STATO GLOBALE
 // ============================================================
 
-/**
- * Stato globale dell'applicazione
- */
-const AppState = {
-  // Tutti gli articoli (standard + extra)
-  items: [],
-  
-  // Articoli extra salvati
-  extraItems: [],
-  
-  // Stato corrente ordine (selezioni, quantità, note)
-  orderState: {},
-  
-  // Filtro attivo
-  activeFilter: 'all', // 'all', 'selected', o nome categoria
-  
-  // Categorie espanse/collassate
-  expandedCategories: {},
-  
-  // Firebase listener attivi
-  unsubscribeListeners: []
-};
+let currentFilter = 'all';
+let items = [];
+let extraItems = [];
+let isInitialized = false;
+let currentOrderId = null;
 
 // ============================================================
 // INIZIALIZZAZIONE
 // ============================================================
 
 /**
- * Inizializza l'applicazione al caricamento della pagina
+ * Inizializza l'applicazione
  */
-document.addEventListener('DOMContentLoaded', () => {
-  console.log("🥐 Inizializzazione Ordini Colazione Hotel...");
+async function initApp() {
+  console.log('🚀 Avvio applicazione...');
   
-  // Registra Service Worker per PWA
-  registerServiceWorker();
-  
-  // Carica articoli standard
-  loadStandardProducts();
-  
-  // Inizializza Firebase
-  const firebaseOk = initializeFirebase();
-  
-  if (firebaseOk) {
-    // Avvia sync realtime
-    startRealtimeSync();
-    updateConnectionStatus('online');
-  } else {
-    // Modalità locale
-    loadLocalState();
-    updateConnectionStatus('local');
+  // Mostra stato caricamento
+  const container = document.getElementById('items-container');
+  if (container) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">⏳</div>
+        <div class="empty-state-text">Caricamento...</div>
+      </div>
+    `;
   }
   
-  // Inizializza stato categorie (tutte espanse)
-  CATEGORIES_ORDER.forEach(cat => {
-    AppState.expandedCategories[cat] = true;
-  });
+  // Carica i prodotti
+  loadProducts();
   
-  // Renderizza interfaccia
-  renderApp();
+  // Prova a caricare i dati salvati
+  await loadSavedData();
   
-  // Setup event listeners globali
-  setupGlobalListeners();
-  
-  console.log("✅ App inizializzata");
-});
-
-/**
- * Registra il Service Worker
- */
-function registerServiceWorker() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/service-worker.js')
-      .then((reg) => {
-        console.log('✅ Service Worker registrato');
-        
-        // Controlla aggiornamenti
-        reg.addEventListener('updatefound', () => {
-          showToast('Nuova versione disponibile. Ricarica la pagina.', 'warning');
-        });
-      })
-      .catch((err) => {
-        console.warn('⚠️ Service Worker non registrato:', err);
-      });
-  }
-}
-
-/**
- * Carica gli articoli standard da products.js
- */
-function loadStandardProducts() {
-  if (typeof STANDARD_PRODUCTS === 'undefined') {
-    console.error("❌ STANDARD_PRODUCTS non trovato in products.js");
-    return;
-  }
-  
-  AppState.items = STANDARD_PRODUCTS.map(product => ({
-    ...product,
-    isExtra: false
-  }));
-  
-  console.log(`📦 Caricati ${AppState.items.length} articoli standard`);
-}
-
-// ============================================================
-// FIREBASE SYNC
-// ============================================================
-
-/**
- * Avvia la sincronizzazione realtime con Firebase
- */
-function startRealtimeSync() {
-  if (!isFirebaseReady()) return;
-  
-  const db = getFirestore();
-  
-  // Sync stato ordine corrente
-  const unsubOrder = db.collection(COLLECTIONS.CURRENT_ORDER)
-    .onSnapshot((snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        const data = change.doc.data();
-        const itemId = change.doc.id;
-        
-        if (change.type === 'added' || change.type === 'modified') {
-          AppState.orderState[itemId] = data;
-        } else if (change.type === 'removed') {
-          delete AppState.orderState[itemId];
-        }
-      });
-      
-      renderApp();
-      updateStats();
-    }, (error) => {
-      console.error("Errore sync ordine:", error);
-      updateConnectionStatus('offline');
+  // Se ancora vuoto, usa i prodotti di default
+  if (items.length === 0) {
+    items = JSON.parse(JSON.stringify(STANDARD_PRODUCTS));
+    items.forEach(item => {
+      item.selected = false;
+      item.qty = 0;
     });
-  
-  AppState.unsubscribeListeners.push(unsubOrder);
-  
-  // Sync articoli extra
-  const unsubExtra = db.collection(COLLECTIONS.EXTRA_ITEMS)
-    .onSnapshot((snapshot) => {
-      AppState.extraItems = [];
-      
-      snapshot.forEach((doc) => {
-        AppState.extraItems.push({
-          id: doc.id,
-          ...doc.data(),
-          isExtra: true
-        });
-      });
-      
-      // Aggiorna lista items
-      updateItemsList();
-      renderApp();
-    }, (error) => {
-      console.error("Errore sync extra:", error);
-    });
-  
-  AppState.unsubscribeListeners.push(unsubExtra);
-  
-  console.log("🔄 Sync realtime attivato");
-}
-
-/**
- * Aggiorna la lista completa degli articoli
- */
-function updateItemsList() {
-  // Ricarica standard
-  const standardItems = STANDARD_PRODUCTS.map(p => ({
-    ...p,
-    isExtra: false
-  }));
-  
-  // Unisci con extra
-  AppState.items = [...standardItems, ...AppState.extraItems];
-}
-
-/**
- * Salva lo stato di un articolo su Firebase
- */
-async function saveItemState(itemId, state) {
-  if (!isFirebaseReady()) {
-    // Salva localmente se Firebase non disponibile
-    saveLocalState();
-    return;
+    console.log('📦 Prodotti di default caricati:', items.length);
   }
   
-  const db = getFirestore();
+  // Aggiorna UI
+  renderItems();
+  updateStats();
+  updateConnectionStatus();
+  isInitialized = true;
   
-  try {
-    if (state.selected || state.quantity > 0 || state.note) {
-      // Salva/aggiorna
-      await db.collection(COLLECTIONS.CURRENT_ORDER).doc(itemId).set(state);
-    } else {
-      // Rimuovi se vuoto
-      await db.collection(COLLECTIONS.CURRENT_ORDER).doc(itemId).delete();
+  console.log('✅ App inizializzata con', items.length, 'prodotti');
+}
+
+/**
+ * Carica i prodotti dal file products.js
+ */
+function loadProducts() {
+  if (typeof STANDARD_PRODUCTS !== 'undefined' && STANDARD_PRODUCTS.length > 0) {
+    console.log('📦 Prodotti caricati da products.js:', STANDARD_PRODUCTS.length);
+    // Non sovrascrivere items se già ci sono dati salvati
+    if (items.length === 0) {
+      items = JSON.parse(JSON.stringify(STANDARD_PRODUCTS));
+      items.forEach(item => {
+        item.selected = false;
+        item.qty = 0;
+      });
     }
-  } catch (error) {
-    console.error("Errore salvataggio:", error);
-    showToast("Errore di sincronizzazione", "error");
+  } else {
+    console.warn('⚠️ STANDARD_PRODUCTS non trovato, uso prodotti di fallback');
+    loadFallbackProducts();
   }
 }
 
 /**
- * Aggiunge un articolo extra su Firebase
+ * Prodotti di fallback (se products.js non viene caricato)
  */
-async function addExtraItem(item) {
-  if (!isFirebaseReady()) {
-    // Aggiungi localmente
-    const localItem = {
-      ...item,
-      id: 'extra-' + Date.now(),
-      isExtra: true
-    };
-    AppState.extraItems.push(localItem);
-    updateItemsList();
-    saveLocalState();
-    renderApp();
-    return localItem.id;
+function loadFallbackProducts() {
+  items = [
+    { id: 'latte-intero', name: 'Latte Intero', category: 'Bevande', selected: false, qty: 0 },
+    { id: 'latte-scremato', name: 'Latte Scremato', category: 'Bevande', selected: false, qty: 0 },
+    { id: 'cappuccino', name: 'Cappuccino in polvere', category: 'Bevande', selected: false, qty: 0 },
+    { id: 'succo-arancia', name: 'Succo d\'Arancia', category: 'Bevande', selected: false, qty: 0 },
+    { id: 'cornetto-cioccolato', name: 'Cornetto Cioccolato', category: 'Cornetti', selected: false, qty: 0 },
+    { id: 'cornetto-albicocca', name: 'Cornetto Albicocca', category: 'Cornetti', selected: false, qty: 0 },
+    { id: 'yogurt-bianco', name: 'Yogurt Bianco', category: 'Yogurt', selected: false, qty: 0 },
+    { id: 'yogurt-fragola', name: 'Yogurt Fragola', category: 'Yogurt', selected: false, qty: 0 },
+    { id: 'prosciutto-cotto', name: 'Prosciutto Cotto', category: 'Salato', selected: false, qty: 0 },
+    { id: 'formaggio-fette', name: 'Formaggio a Fette', category: 'Salato', selected: false, qty: 0 },
+    { id: 'marmellata-albicocca', name: 'Marmellata Albicocca', category: 'Dolci', selected: false, qty: 0 },
+    { id: 'miele-monodose', name: 'Miele Monodose', category: 'Dolci', selected: false, qty: 0 },
+    { id: 'pane-slice', name: 'Pane in Cassetta', category: 'Extra', selected: false, qty: 0 },
+    { id: 'biscotti-secchi', name: 'Biscotti Secchi', category: 'Extra', selected: false, qty: 0 }
+  ];
+}
+
+// ============================================================
+// CARICAMENTO DATI SALVATI
+// ============================================================
+
+/**
+ * Carica i dati salvati (prima Firebase, poi localStorage)
+ */
+async function loadSavedData() {
+  // Prova a caricare da Firebase
+  if (isFirebaseReady()) {
+    try {
+      await loadFromFirebase();
+      if (items.length > 0) {
+        console.log('☁️ Dati caricati da Firebase');
+        return;
+      }
+    } catch (error) {
+      console.warn('⚠️ Errore caricamento Firebase:', error);
+    }
   }
   
-  const db = getFirestore();
-  
+  // Fallback: localStorage
+  loadFromLocalStorage();
+}
+
+/**
+ * Carica da Firebase
+ */
+async function loadFromFirebase() {
   try {
-    const docRef = await db.collection(COLLECTIONS.EXTRA_ITEMS).add({
-      name: item.name,
-      category: item.category || 'Extra',
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    const db = getFirestore();
+    if (!db) return;
+    
+    const snapshot = await db.collection('currentOrder').get();
+    if (snapshot.empty) {
+      console.log('ℹ️ Nessun ordine salvato su Firebase');
+      return;
+    }
+    
+    let foundData = false;
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (data.items && data.items.length > 0) {
+        items = data.items;
+        currentOrderId = doc.id;
+        foundData = true;
+        console.log('✅ Ordine caricato da Firebase ID:', currentOrderId);
+      }
+      if (data.extraItems) {
+        extraItems = data.extraItems || [];
+      }
     });
     
-    return docRef.id;
-  } catch (error) {
-    console.error("Errore aggiunta extra:", error);
-    showToast("Errore aggiunta articolo", "error");
-    return null;
-  }
-}
-
-/**
- * Elimina un articolo extra
- */
-async function deleteExtraItem(itemId) {
-  if (!isFirebaseReady()) {
-    AppState.extraItems = AppState.extraItems.filter(i => i.id !== itemId);
-    delete AppState.orderState[itemId];
-    updateItemsList();
-    saveLocalState();
-    renderApp();
-    return;
-  }
-  
-  const db = getFirestore();
-  
-  try {
-    await db.collection(COLLECTIONS.EXTRA_ITEMS).doc(itemId).delete();
-    await db.collection(COLLECTIONS.CURRENT_ORDER).doc(itemId).delete();
-    showToast("Articolo eliminato", "success");
-  } catch (error) {
-    console.error("Errore eliminazione:", error);
-    showToast("Errore eliminazione", "error");
-  }
-}
-
-// ============================================================
-// STORAGE LOCALE (Fallback)
-// ============================================================
-
-const LOCAL_STORAGE_KEY = 'ordiniColazioneHotel';
-
-/**
- * Salva stato in localStorage
- */
-function saveLocalState() {
-  const data = {
-    orderState: AppState.orderState,
-    extraItems: AppState.extraItems,
-    timestamp: Date.now()
-  };
-  
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    console.warn("Errore salvataggio locale:", e);
-  }
-}
-
-/**
- * Carica stato da localStorage
- */
-function loadLocalState() {
-  try {
-    const data = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (data) {
-      const parsed = JSON.parse(data);
-      AppState.orderState = parsed.orderState || {};
-      AppState.extraItems = parsed.extraItems || [];
-      updateItemsList();
-      console.log("📂 Stato locale caricato");
+    if (!foundData) {
+      console.log('ℹ️ Nessun dato valido su Firebase');
     }
-  } catch (e) {
-    console.warn("Errore caricamento locale:", e);
+  } catch (error) {
+    console.error('❌ Errore caricamento Firebase:', error);
+  }
+}
+
+/**
+ * Carica dal localStorage
+ */
+function loadFromLocalStorage() {
+  try {
+    const saved = localStorage.getItem('orderData');
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (data.items && data.items.length > 0) {
+        items = data.items;
+        console.log('💾 Dati caricati dal localStorage:', items.length);
+      }
+      if (data.extraItems) {
+        extraItems = data.extraItems || [];
+      }
+    }
+  } catch (error) {
+    console.error('❌ Errore localStorage:', error);
   }
 }
 
 // ============================================================
-// RENDERING UI
+// SALVATAGGIO DATI
 // ============================================================
 
 /**
- * Renderizza l'intera applicazione
+ * Salva i dati (Firebase + localStorage)
  */
-function renderApp() {
+async function saveData() {
+  // Salva sempre in localStorage
+  saveToLocalStorage();
+  
+  // Salva in Firebase se disponibile
+  if (isFirebaseReady() && navigator.onLine) {
+    await saveToFirebase();
+  }
+}
+
+/**
+ * Salva in localStorage
+ */
+function saveToLocalStorage() {
+  try {
+    const data = {
+      items: items,
+      extraItems: extraItems,
+      timestamp: new Date().toISOString()
+    };
+    localStorage.setItem('orderData', JSON.stringify(data));
+    console.log('💾 Dati salvati in localStorage');
+  } catch (error) {
+    console.error('❌ Errore salvataggio localStorage:', error);
+  }
+}
+
+/**
+ * Salva in Firebase
+ */
+async function saveToFirebase() {
+  try {
+    const db = getFirestore();
+    if (!db) return;
+    
+    const orderData = {
+      items: items,
+      extraItems: extraItems,
+      updatedAt: new Date().toISOString(),
+      totalItems: items.filter(i => i.selected && i.qty > 0).length,
+      totalQty: items.reduce((sum, i) => sum + (i.selected ? i.qty : 0), 0)
+    };
+    
+    if (currentOrderId) {
+      await db.collection('currentOrder').doc(currentOrderId).update(orderData);
+      console.log('☁️ Dati aggiornati su Firebase (ID:', currentOrderId, ')');
+    } else {
+      const docRef = await db.collection('currentOrder').add(orderData);
+      currentOrderId = docRef.id;
+      console.log('☁️ Nuovo ordine creato su Firebase (ID:', currentOrderId, ')');
+    }
+  } catch (error) {
+    console.error('❌ Errore salvataggio Firebase:', error);
+  }
+}
+
+// ============================================================
+// RENDERIZZAZIONE
+// ============================================================
+
+/**
+ * Renderizza gli articoli
+ */
+function renderItems() {
   const container = document.getElementById('items-container');
   if (!container) return;
   
-  // Raggruppa per categoria
-  const grouped = groupByCategory(getFilteredItems());
+  // Filtra items
+  let filteredItems = [...items];
   
-  // Genera HTML
-  let html = '';
+  if (currentFilter === 'selected') {
+    filteredItems = filteredItems.filter(item => item.selected && item.qty > 0);
+  } else if (currentFilter !== 'all') {
+    filteredItems = filteredItems.filter(item => item.category === currentFilter);
+  }
   
-  CATEGORIES_ORDER.forEach(category => {
-    const items = grouped[category];
-    if (!items || items.length === 0) return;
-    
-    const isExpanded = AppState.expandedCategories[category] !== false;
-    const selectedCount = items.filter(i => getItemState(i.id).selected).length;
-    
-    html += `
-      <div class="category ${isExpanded ? '' : 'collapsed'}" data-category="${category}">
-        <div class="category-header" onclick="toggleCategory('${category}')">
-          <div class="category-title">
-            <span class="category-icon">${getCategoryIcon(category)}</span>
-            <span>${category}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <span class="category-count ${selectedCount > 0 ? 'has-selected' : ''}">${selectedCount}/${items.length}</span>
-            <span class="category-toggle">▼</span>
-          </div>
+  // Se filtro "selected" e non ci sono risultati
+  if (currentFilter === 'selected' && filteredItems.length === 0 && extraItems.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">📭</div>
+        <div class="empty-state-text">
+          Nessun articolo selezionato
+          <br>
+          <small>Tocca ☐ per selezionare gli articoli da ordinare</small>
         </div>
-        <div class="category-items" style="max-height: ${isExpanded ? items.length * 60 + 'px' : '0'}">
-          ${items.map(item => renderItemRow(item)).join('')}
+      </div>
+    `;
+    return;
+  }
+  
+  // Se nessun filtro e nessun item
+  if (filteredItems.length === 0 && extraItems.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">📦</div>
+        <div class="empty-state-text">
+          Nessun prodotto disponibile
+          <br>
+          <small>Caricamento prodotti in corso...</small>
+        </div>
+      </div>
+    `;
+    return;
+  }
+  
+  // Ordina: prima selezionati, poi per categoria
+  filteredItems.sort((a, b) => {
+    if (a.selected !== b.selected) return a.selected ? -1 : 1;
+    return a.category.localeCompare(b.category) || a.name.localeCompare(b.name);
+  });
+  
+  let html = '';
+  let currentCategory = '';
+  
+  filteredItems.forEach((item) => {
+    // Header categoria
+    if (item.category !== currentCategory) {
+      currentCategory = item.category;
+      const categoryItems = filteredItems.filter(i => i.category === currentCategory);
+      const selectedInCategory = categoryItems.filter(i => i.selected && i.qty > 0).length;
+      
+      html += `
+        <div class="category-header" data-category="${currentCategory}">
+          <span class="category-title">
+            <span class="category-icon">${getCategoryIcon(currentCategory)}</span>
+            ${currentCategory}
+          </span>
+          <span class="category-count ${selectedInCategory > 0 ? 'has-selected' : ''}">
+            ${selectedInCategory}/${categoryItems.length}
+          </span>
+        </div>
+      `;
+    }
+    
+    const isSelected = item.selected && item.qty > 0;
+    html += `
+      <div class="item-row ${isSelected ? 'selected' : ''}" data-id="${item.id}">
+        <div class="item-checkbox" onclick="toggleSelect('${item.id}')">
+          ${isSelected ? '✓' : ''}
+        </div>
+        <div class="item-name" onclick="toggleSelect('${item.id}')">
+          ${item.name}
+        </div>
+        <div class="item-qty-controls">
+          <button class="qty-btn minus" onclick="adjustQty('${item.id}', -1)" ${!isSelected ? 'disabled style="opacity:0.3;"' : ''}>−</button>
+          <span class="item-qty ${isSelected ? 'has-qty' : ''}">${isSelected ? item.qty : 0}</span>
+          <button class="qty-btn plus" onclick="adjustQty('${item.id}', 1)">+</button>
         </div>
       </div>
     `;
   });
   
-  if (html === '') {
-    html = `
-      <div class="empty-state">
-        <div class="empty-state-icon">📋</div>
-        <div class="empty-state-text">Nessun articolo da visualizzare</div>
+  // Extra items
+  if (extraItems.length > 0 && currentFilter !== 'selected') {
+    html += `
+      <div class="category-header" data-category="Extra">
+        <span class="category-title">
+          <span class="category-icon">➕</span>
+          Extra
+        </span>
+        <span class="category-count has-selected">${extraItems.length}</span>
       </div>
     `;
+    
+    extraItems.forEach((item, index) => {
+      html += `
+        <div class="item-row extra selected" data-id="extra_${index}">
+          <div class="item-checkbox" style="background:#fbbf24;border-color:#fbbf24;color:#78350f;">
+            ✚
+          </div>
+          <div class="item-name">
+            ${item.name}
+            <span class="extra-badge">EXTRA</span>
+          </div>
+          <div class="item-qty-controls">
+            <button class="qty-btn minus" onclick="adjustExtraQty(${index}, -1)">−</button>
+            <span class="item-qty has-qty">${item.qty || 0}</span>
+            <button class="qty-btn plus" onclick="adjustExtraQty(${index}, 1)">+</button>
+            <button class="item-delete-btn" onclick="removeExtra(${index})" title="Rimuovi">✖</button>
+          </div>
+        </div>
+      `;
+    });
   }
   
   container.innerHTML = html;
-  
-  // Aggiorna stats
   updateStats();
 }
 
 /**
- * Renderizza una singola riga articolo
- */
-function renderItemRow(item) {
-  const state = getItemState(item.id);
-  const isSelected = state.selected;
-  const quantity = state.quantity || 0;
-  const note = state.note || '';
-  
-  const classes = [
-    'item-row',
-    isSelected ? 'selected' : '',
-    item.isExtra ? 'extra' : ''
-  ].filter(Boolean).join(' ');
-  
-  return `
-    <div class="${classes}" data-id="${item.id}">
-      <div class="item-checkbox" onclick="toggleItem('${item.id}')"></div>
-      
-      <div class="item-name ${note ? 'has-note' : ''}" onclick="toggleItem('${item.id}')">
-        <span>
-          ${item.name}
-          ${item.isExtra ? '<span class="extra-badge">EXTRA</span>' : ''}
-        </span>
-        ${note ? `<span class="item-note-preview">${escapeHtml(note)}</span>` : ''}
-      </div>
-      
-      <div class="item-qty-controls">
-        <button class="qty-btn minus" onclick="changeQty('${item.id}', -1)">−</button>
-        <span class="item-qty ${quantity > 0 ? 'has-qty' : ''}">${quantity}</span>
-        <button class="qty-btn plus" onclick="changeQty('${item.id}', 1)">+</button>
-      </div>
-      
-      <button class="item-note-btn ${note ? 'has-note' : ''}" onclick="editNote('${item.id}')" title="Note">
-        📝
-      </button>
-      
-      ${item.isExtra ? `
-        <button class="item-delete-btn" onclick="confirmDeleteExtra('${item.id}')" title="Elimina">
-          🗑️
-        </button>
-      ` : ''}
-      
-      <span class="print-qty">${quantity > 0 ? quantity : ''}</span>
-    </div>
-  `;
-}
-
-/**
- * Ottiene lo stato di un articolo
- */
-function getItemState(itemId) {
-  return AppState.orderState[itemId] || {
-    selected: false,
-    quantity: 0,
-    note: ''
-  };
-}
-
-/**
- * Raggruppa gli articoli per categoria
- */
-function groupByCategory(items) {
-  const grouped = {};
-  
-  items.forEach(item => {
-    const category = item.category || 'Extra';
-    if (!grouped[category]) {
-      grouped[category] = [];
-    }
-    grouped[category].push(item);
-  });
-  
-  return grouped;
-}
-
-/**
- * Filtra gli articoli in base al filtro attivo
- */
-function getFilteredItems() {
-  let items = AppState.items;
-  
-  if (AppState.activeFilter === 'selected') {
-    items = items.filter(i => getItemState(i.id).selected);
-  } else if (AppState.activeFilter !== 'all') {
-    items = items.filter(i => i.category === AppState.activeFilter);
-  }
-  
-  return items;
-}
-
-/**
- * Restituisce l'icona per una categoria
+ * Ottieni icona per categoria
  */
 function getCategoryIcon(category) {
   const icons = {
+    'Bevande': '☕',
     'Cornetti': '🥐',
-    'Bevande': '🥛',
     'Yogurt': '🥄',
-    'Salumi': '🥓',
-    'Formaggi': '🧀',
-    'Frigo': '❄️',
-    'Monouso': '🧻',
-    'Extra': '⭐'
+    'Salato': '🥓',
+    'Dolci': '🍯',
+    'Extra': '➕'
   };
   return icons[category] || '📦';
 }
 
 /**
- * Aggiorna le statistiche nell'header
+ * Aggiorna le statistiche
  */
 function updateStats() {
-  const selectedItems = AppState.items.filter(i => getItemState(i.id).selected);
-  const totalQty = selectedItems.reduce((sum, i) => sum + (getItemState(i.id).quantity || 0), 0);
+  const selectedCount = items.filter(i => i.selected && i.qty > 0).length;
+  const totalQty = items.reduce((sum, i) => sum + (i.selected ? i.qty : 0), 0);
+  const extraTotal = extraItems.reduce((sum, i) => sum + (i.qty || 0), 0);
   
-  const selectedCountEl = document.getElementById('selected-count');
-  const totalQtyEl = document.getElementById('total-qty');
+  const selectedEl = document.getElementById('selected-count');
+  const totalEl = document.getElementById('total-qty');
   
-  if (selectedCountEl) selectedCountEl.textContent = selectedItems.length;
-  if (totalQtyEl) totalQtyEl.textContent = totalQty;
+  if (selectedEl) selectedEl.textContent = selectedCount + extraItems.length;
+  if (totalEl) totalEl.textContent = totalQty + extraTotal;
 }
 
 /**
- * Aggiorna indicatore stato connessione
+ * Aggiorna stato connessione
  */
-function updateConnectionStatus(status) {
-  const el = document.getElementById('connection-status');
-  if (!el) return;
+function updateConnectionStatus() {
+  const statusEl = document.getElementById('connection-status');
+  if (!statusEl) return;
   
-  el.className = 'connection-status ' + status;
+  const isOnline = navigator.onLine;
+  const isFirebase = isFirebaseReady();
   
-  const labels = {
-    'online': '● Online',
-    'offline': '● Offline',
-    'local': '● Locale'
-  };
-  
-  el.textContent = labels[status] || status;
+  if (isOnline && isFirebase) {
+    statusEl.className = 'connection-status online';
+    statusEl.textContent = '● Cloud';
+  } else if (isOnline) {
+    statusEl.className = 'connection-status local';
+    statusEl.textContent = '● Locale';
+  } else {
+    statusEl.className = 'connection-status offline';
+    statusEl.textContent = '● Offline';
+  }
 }
 
 // ============================================================
-// INTERAZIONI UTENTE
+// INTERAZIONI
 // ============================================================
 
 /**
- * Toggle selezione articolo
+ * Regola quantità di un articolo
  */
-function toggleItem(itemId) {
-  const state = getItemState(itemId);
-  state.selected = !state.selected;
+function adjustQty(itemId, delta) {
+  const item = items.find(i => i.id === itemId);
+  if (!item) return;
   
-  // Se selezionato e quantità 0, imposta a 1
-  if (state.selected && state.quantity === 0) {
-    state.quantity = 1;
-  }
+  const newQty = Math.max(0, (item.qty || 0) + delta);
+  item.qty = newQty;
+  item.selected = newQty > 0;
   
-  AppState.orderState[itemId] = state;
-  saveItemState(itemId, state);
-  renderApp();
+  renderItems();
+  saveData();
 }
 
 /**
- * Modifica quantità articolo
+ * Toggle selezione di un articolo
  */
-function changeQty(itemId, delta) {
-  const state = getItemState(itemId);
-  const newQty = Math.max(0, (state.quantity || 0) + delta);
+function toggleSelect(itemId) {
+  const item = items.find(i => i.id === itemId);
+  if (!item) return;
   
-  state.quantity = newQty;
-  
-  // Auto-seleziona se quantità > 0
-  if (newQty > 0) {
-    state.selected = true;
-  }
-  
-  // Auto-deseleziona se quantità = 0
-  if (newQty === 0) {
-    state.selected = false;
-  }
-  
-  AppState.orderState[itemId] = state;
-  saveItemState(itemId, state);
-  renderApp();
-}
-
-/**
- * Modifica nota articolo
- */
-function editNote(itemId) {
-  const item = AppState.items.find(i => i.id === itemId);
-  const state = getItemState(itemId);
-  
-  showModal('note-modal', {
-    title: `Note: ${item ? item.name : 'Articolo'}`,
-    content: `
-      <div class="form-group">
-        <label class="form-label">Nota (opzionale)</label>
-        <textarea class="form-textarea" id="note-input" placeholder="Es: solo se in offerta, marca specifica...">${state.note || ''}</textarea>
-      </div>
-    `,
-    onConfirm: () => {
-      const noteInput = document.getElementById('note-input');
-      state.note = noteInput.value.trim();
-      AppState.orderState[itemId] = state;
-      saveItemState(itemId, state);
-      hideModal('note-modal');
-      renderApp();
+  if (item.selected) {
+    item.selected = false;
+    item.qty = 0;
+  } else {
+    item.selected = true;
+    if (!item.qty || item.qty === 0) {
+      item.qty = 1;
     }
-  });
+  }
+  
+  renderItems();
+  saveData();
 }
 
 /**
- * Toggle espansione categoria
+ * Aggiungi articolo extra
  */
-function toggleCategory(category) {
-  AppState.expandedCategories[category] = !AppState.expandedCategories[category];
-  renderApp();
+function addExtraItem(name, qty) {
+  if (!name || name.trim() === '') {
+    showToast('Inserisci un nome valido', 'warning');
+    return;
+  }
+  
+  extraItems.push({ 
+    name: name.trim(), 
+    qty: qty || 1,
+    category: 'Extra'
+  });
+  
+  renderItems();
+  saveData();
+  showToast(`✅ Aggiunto "${name.trim()}"`, 'success');
 }
 
 /**
- * Imposta filtro attivo
+ * Regola quantità extra
+ */
+function adjustExtraQty(index, delta) {
+  if (index < 0 || index >= extraItems.length) return;
+  const newQty = Math.max(0, (extraItems[index].qty || 0) + delta);
+  extraItems[index].qty = newQty;
+  
+  if (newQty === 0) {
+    extraItems.splice(index, 1);
+  }
+  
+  renderItems();
+  saveData();
+}
+
+/**
+ * Rimuovi extra
+ */
+function removeExtra(index) {
+  if (index < 0 || index >= extraItems.length) return;
+  const name = extraItems[index].name;
+  extraItems.splice(index, 1);
+  renderItems();
+  saveData();
+  showToast(`🗑️ Rimosso "${name}"`, 'info');
+}
+
+// ============================================================
+// FILTRI
+// ============================================================
+
+/**
+ * Imposta filtro
  */
 function setFilter(filter) {
-  AppState.activeFilter = filter;
+  currentFilter = filter;
   
-  // Aggiorna UI filtri
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.filter === filter);
   });
   
-  renderApp();
+  renderItems();
 }
 
 // ============================================================
-// ARTICOLI EXTRA
+// MODALE EXTRA
 // ============================================================
 
 /**
- * Mostra modal per aggiungere articolo extra
+ * Mostra modal per aggiungere extra
  */
 function showAddExtraModal() {
-  // Genera opzioni categorie
-  const categoryOptions = CATEGORIES_ORDER
-    .map(cat => `<option value="${cat}">${cat}</option>`)
-    .join('');
+  const name = prompt('Inserisci il nome dell\'articolo extra:');
+  if (!name || name.trim() === '') return;
   
-  showModal('extra-modal', {
-    title: 'Aggiungi Articolo Extra',
-    content: `
-      <div class="form-group">
-        <label class="form-label">Nome Articolo *</label>
-        <input type="text" class="form-input" id="extra-name" placeholder="Es: Torta evento aziendale" required>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Categoria</label>
-        <select class="form-select" id="extra-category">
-          ${categoryOptions}
-        </select>
-      </div>
-    `,
-    onConfirm: async () => {
-      const name = document.getElementById('extra-name').value.trim();
-      const category = document.getElementById('extra-category').value;
-      
-      if (!name) {
-        showToast('Inserisci un nome', 'error');
-        return;
-      }
-      
-      const itemId = await addExtraItem({ name, category });
-      
-      if (itemId) {
-        showToast('Articolo extra aggiunto', 'success');
-        hideModal('extra-modal');
-        
-        // Auto-seleziona il nuovo articolo
-        setTimeout(() => {
-          toggleItem(itemId);
-        }, 100);
-      }
-    }
-  });
+  const qty = prompt('Inserisci la quantità:', '1');
+  const qtyNum = parseInt(qty) || 1;
   
-  // Focus sul campo nome
-  setTimeout(() => {
-    document.getElementById('extra-name')?.focus();
-  }, 100);
-}
-
-/**
- * Conferma eliminazione articolo extra
- */
-function confirmDeleteExtra(itemId) {
-  const item = AppState.items.find(i => i.id === itemId);
-  
-  showModal('confirm-modal', {
-    title: 'Elimina Articolo Extra',
-    content: `
-      <p>Sei sicuro di voler eliminare <strong>${item ? item.name : 'questo articolo'}</strong>?</p>
-      <p style="color:#6b7280;font-size:0.85rem;margin-top:8px;">Questa azione non può essere annullata.</p>
-    `,
-    confirmText: 'Elimina',
-    confirmClass: 'btn-danger',
-    onConfirm: () => {
-      deleteExtraItem(itemId);
-      hideModal('confirm-modal');
-    }
-  });
-}
-
-// ============================================================
-// RESET ORDINE
-// ============================================================
-
-/**
- * Conferma e resetta l'ordine
- */
-function confirmResetOrder() {
-  showModal('confirm-modal', {
-    title: 'Reset Ordine',
-    content: `
-      <p>Sei sicuro di voler resettare l'ordine?</p>
-      <p style="color:#6b7280;font-size:0.85rem;margin-top:8px;">
-        Questa azione cancellerà tutte le selezioni, le quantità e gli articoli extra.
-      </p>
-    `,
-    confirmText: 'Reset',
-    confirmClass: 'btn-danger',
-    onConfirm: async () => {
-      await resetOrder();
-      hideModal('confirm-modal');
-    }
-  });
-}
-
-/**
- * Resetta l'ordine
- */
-async function resetOrder() {
-  if (isFirebaseReady()) {
-    const db = getFirestore();
-    const batch = db.batch();
-    
-    // Elimina tutti i documenti in currentOrder
-    const orderSnapshot = await db.collection(COLLECTIONS.CURRENT_ORDER).get();
-    orderSnapshot.forEach(doc => batch.delete(doc.ref));
-    
-    // Elimina tutti gli articoli extra
-    const extraSnapshot = await db.collection(COLLECTIONS.EXTRA_ITEMS).get();
-    extraSnapshot.forEach(doc => batch.delete(doc.ref));
-    
-    try {
-      await batch.commit();
-    } catch (error) {
-      console.error("Errore reset:", error);
-      showToast("Errore durante il reset", "error");
-      return;
-    }
-  }
-  
-  // Reset stato locale
-  AppState.orderState = {};
-  AppState.extraItems = [];
-  updateItemsList();
-  saveLocalState();
-  
-  renderApp();
-  showToast("Ordine resettato", "success");
+  addExtraItem(name.trim(), qtyNum);
 }
 
 // ============================================================
@@ -748,248 +558,142 @@ async function resetOrder() {
 // ============================================================
 
 /**
- * Stampa l'ordine
+ * Stampa ordine
  */
 function printOrder() {
-  const selectedItems = AppState.items.filter(i => getItemState(i.id).selected);
+  const selectedItems = items.filter(i => i.selected && i.qty > 0);
   
-  if (selectedItems.length === 0) {
-    showToast("Nessun articolo selezionato da stampare", "warning");
+  if (selectedItems.length === 0 && extraItems.length === 0) {
+    showToast('⚠️ Nessun articolo selezionato per la stampa', 'warning');
     return;
   }
   
-  // Prepara intestazione stampa
-  const printHeader = document.querySelector('.print-header');
-  if (printHeader) {
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('it-IT', { 
-      weekday: 'long', 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric' 
+  // Aggiorna data nella stampa
+  const dateEl = document.getElementById('print-date');
+  if (dateEl) {
+    dateEl.textContent = 'Data: ' + new Date().toLocaleDateString('it-IT', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
     });
-    printHeader.querySelector('p').textContent = `Ordine del ${dateStr}`;
   }
   
-  // Prepara footer stampa
-  const printFooter = document.querySelector('.print-footer');
-  if (printFooter) {
-    printFooter.textContent = `Totale articoli: ${selectedItems.length} | Generato il ${new Date().toLocaleString('it-IT')}`;
-  }
-  
-  // Lancia stampa
   window.print();
 }
 
 // ============================================================
-// MODAL SYSTEM
+// RESET
 // ============================================================
 
-let currentModal = null;
+/**
+ * Conferma reset ordine
+ */
+function confirmResetOrder() {
+  if (confirm('⚠️ Sei sicuro di voler resettare TUTTO l\'ordine?\n\nQuesta azione non può essere annullata.')) {
+    resetOrder();
+  }
+}
 
 /**
- * Mostra un modal
+ * Reset ordine
  */
-function showModal(id, options = {}) {
-  // Crea o aggiorna il modal
-  let overlay = document.getElementById('modal-overlay');
-  
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.id = 'modal-overlay';
-    overlay.className = 'modal-overlay';
-    overlay.onclick = (e) => {
-      if (e.target === overlay) hideModal();
-    };
-    document.body.appendChild(overlay);
-  }
-  
-  const confirmText = options.confirmText || 'Conferma';
-  const confirmClass = options.confirmClass || 'btn-primary';
-  
-  overlay.innerHTML = `
-    <div class="modal" id="${id}">
-      <div class="modal-header">
-        <span class="modal-title">${options.title || ''}</span>
-        <button class="modal-close" onclick="hideModal()">&times;</button>
-      </div>
-      <div class="modal-body">
-        ${options.content || ''}
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="hideModal()">Annulla</button>
-        <button class="btn ${confirmClass}" id="modal-confirm-btn">${confirmText}</button>
-      </div>
-    </div>
-  `;
-  
-  // Aggiungi listener conferma
-  const confirmBtn = document.getElementById('modal-confirm-btn');
-  if (confirmBtn && options.onConfirm) {
-    confirmBtn.onclick = options.onConfirm;
-  }
-  
-  // Mostra
-  requestAnimationFrame(() => {
-    overlay.classList.add('active');
+function resetOrder() {
+  items.forEach(item => {
+    item.selected = false;
+    item.qty = 0;
   });
+  extraItems = [];
   
-  currentModal = id;
-}
-
-/**
- * Nasconde il modal corrente
- */
-function hideModal() {
-  const overlay = document.getElementById('modal-overlay');
-  if (overlay) {
-    overlay.classList.remove('active');
+  // Reset anche su Firebase
+  if (currentOrderId && isFirebaseReady()) {
+    try {
+      const db = getFirestore();
+      if (db) {
+        db.collection('currentOrder').doc(currentOrderId).delete();
+        currentOrderId = null;
+        console.log('🗑️ Ordine eliminato da Firebase');
+      }
+    } catch (e) {
+      console.warn('Errore eliminazione Firebase:', e);
+    }
   }
-  currentModal = null;
+  
+  renderItems();
+  saveData();
+  showToast('🔄 Ordine resettato', 'info');
 }
 
 // ============================================================
-// TOAST NOTIFICATIONS
+// TOAST NOTIFICHE
 // ============================================================
 
 /**
- * Mostra una notifica toast
+ * Mostra toast notification
  */
 function showToast(message, type = 'info') {
-  let container = document.querySelector('.toast-container');
-  
-  if (!container) {
-    container = document.createElement('div');
-    container.className = 'toast-container';
-    document.body.appendChild(container);
-  }
-  
+  const container = document.getElementById('toast-container') || createToastContainer();
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
   toast.textContent = message;
   
   container.appendChild(toast);
   
-  // Rimuovi dopo 3 secondi
   setTimeout(() => {
     toast.style.opacity = '0';
+    toast.style.transform = 'translateY(-10px)';
+    toast.style.transition = 'all 0.3s ease';
     setTimeout(() => toast.remove(), 300);
-  }, 3000);
-}
-
-// ============================================================
-// UTILITIES
-// ============================================================
-
-/**
- * Escape HTML per prevenire XSS
- */
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  }, 2500);
 }
 
 /**
- * Setup listener globali
+ * Crea container per toast
  */
-function setupGlobalListeners() {
-  // Gestione online/offline
-  window.addEventListener('online', () => {
-    updateConnectionStatus('online');
-    showToast('Connessione ripristinata', 'success');
-  });
-  
-  window.addEventListener('offline', () => {
-    updateConnectionStatus('offline');
-    showToast('Modalità offline', 'warning');
-  });
-  
-  // Keyboard shortcuts
-  document.addEventListener('keydown', (e) => {
-    // ESC chiude modal
-    if (e.key === 'Escape' && currentModal) {
-      hideModal();
-    }
-  });
+function createToastContainer() {
+  const container = document.createElement('div');
+  container.id = 'toast-container';
+  container.className = 'toast-container';
+  document.body.appendChild(container);
+  return container;
 }
 
 // ============================================================
-// STORICO ORDINI (Struttura per futura implementazione)
+// GESTIONE CONNESSIONE
 // ============================================================
 
-/**
- * Salva l'ordine corrente nello storico
- * @returns {Promise<string|null>} ID dell'ordine salvato
- */
-async function saveOrderToHistory() {
-  const selectedItems = AppState.items
-    .filter(i => getItemState(i.id).selected)
-    .map(item => ({
-      id: item.id,
-      name: item.name,
-      category: item.category,
-      isExtra: item.isExtra,
-      ...getItemState(item.id)
-    }));
-  
-  if (selectedItems.length === 0) {
-    showToast("Nessun articolo da salvare", "warning");
-    return null;
-  }
-  
-  if (!isFirebaseReady()) {
-    showToast("Storico non disponibile in modalità locale", "warning");
-    return null;
-  }
-  
-  const db = getFirestore();
-  
-  try {
-    const docRef = await db.collection(COLLECTIONS.ORDER_HISTORY).add({
-      items: selectedItems,
-      itemCount: selectedItems.length,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+// Ascolta eventi di connessione
+window.addEventListener('online', () => {
+  console.log('📶 Connessione ripristinata');
+  updateConnectionStatus();
+  // Se Firebase è pronto, sincronizza
+  if (isFirebaseReady()) {
+    loadFromFirebase().then(() => {
+      renderItems();
+      showToast('📶 Sincronizzato con il cloud', 'success');
     });
-    
-    showToast("Ordine salvato nello storico", "success");
-    return docRef.id;
-  } catch (error) {
-    console.error("Errore salvataggio storico:", error);
-    showToast("Errore salvataggio", "error");
-    return null;
   }
-}
+});
 
-/**
- * Carica un ordine dallo storico (futura implementazione)
- * @param {string} orderId - ID dell'ordine da caricare
- */
-async function loadOrderFromHistory(orderId) {
-  // TODO: Implementare caricamento ordine dallo storico
-  console.log("loadOrderFromHistory:", orderId);
-}
-
-/**
- * Duplica un ordine dallo storico (futura implementazione)
- * @param {string} orderId - ID dell'ordine da duplicare
- */
-async function duplicateOrder(orderId) {
-  // TODO: Implementare duplicazione ordine
-  console.log("duplicateOrder:", orderId);
-}
+window.addEventListener('offline', () => {
+  console.log('📴 Connessione persa');
+  updateConnectionStatus();
+  showToast('📴 Modalità offline attiva', 'warning');
+});
 
 // ============================================================
-// ESPORTA FUNZIONI GLOBALI (per onclick inline)
+// AVVIO APP
 // ============================================================
-window.toggleItem = toggleItem;
-window.changeQty = changeQty;
-window.editNote = editNote;
-window.toggleCategory = toggleCategory;
-window.setFilter = setFilter;
-window.showAddExtraModal = showAddExtraModal;
-window.confirmDeleteExtra = confirmDeleteExtra;
-window.confirmResetOrder = confirmResetOrder;
-window.printOrder = printOrder;
-window.hideModal = hideModal;
-window.saveOrderToHistory = saveOrderToHistory;
+
+// Attendi il caricamento del DOM
+document.addEventListener('DOMContentLoaded', () => {
+  // Piccolo ritardo per assicurarsi che Firebase sia caricato
+  setTimeout(initApp, 100);
+});
+
+// Se la pagina è già caricata
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  setTimeout(initApp, 100);
+}
+
+console.log('📦 app.js caricato correttamente');
